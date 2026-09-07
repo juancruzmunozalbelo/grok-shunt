@@ -1,0 +1,5 @@
+{
+  "name": "shunt",
+  "description": "Route large file I/O and boilerplate off Grok's frontier model onto a cheaper worker.",
+  "version": "0.1.0"
+}

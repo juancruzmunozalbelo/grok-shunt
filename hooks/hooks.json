@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "read_file|Read|run_terminal_command|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "check-read.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
