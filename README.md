@@ -9,7 +9,7 @@ The worker's **last message** does enter the parent. The bulk-reader agent is in
 ## Install
 
 ```bash
-grok plugin install juan-munoz_scann/grok-shunt --trust
+grok plugin install juancruzmunozalbelo/grok-shunt --trust
 ```
 
 Then enable it (`plugins` stay off until listed):
