@@ -82,7 +82,10 @@ grok plugin uninstall shunt --confirm
 ```bash
 python3 -m unittest discover -s tests -v
 grok plugin validate .
+python3 scripts/bench_tokens.py --lines 800
 ```
+
+`bench_tokens.py` runs two isolated `grok -p` sessions (shunt on vs `SHUNT_DISABLE=1`) and prints frontier vs worker tokens plus whether the file body leaked into the parent. Headless often cannot spawn `shunt:bulk-reader`; the leak/deny columns are the ones that validate the hook.
 
 Hook fail-open: invalid JSON or a missing file does not block. Only an explicit deny JSON blocks.
 
