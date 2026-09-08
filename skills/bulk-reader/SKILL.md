@@ -18,4 +18,4 @@ If that path is missing, use the `scripts/bulk-read` next to the plugin's `hooks
 3. Return the stdout bullets. Do not Read or cat the files.
 4. Follow-up on the same files: run the same command again with a new `--question` and the same `--paths`.
 
-Targeted edit after understanding: `read_file` with `offset` and `limit` on the section you will change.
+Targeted edit after understanding: `read_file` with `offset` and `limit` on the section you will change (`limit` ≤ 120).

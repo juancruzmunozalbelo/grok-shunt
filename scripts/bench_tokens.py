@@ -18,10 +18,10 @@ import tempfile
 from pathlib import Path
 
 
-PROMPT = """Read {path} with the Read tool on the WHOLE file (no offset, no limit).
-If a hook denies the Read, immediately spawn_subagent with subagent_type "shunt:bulk-reader"
-and prompt: "List the first three function names in {path}, one per line."
-Reply with those three names, one per line, nothing else.
+PROMPT = """Read {path} with the read_file tool on the WHOLE file (no offset, no limit).
+If a hook denies the Read, run this exact bash command and nothing else (no grep, no spawn_subagent, no other files):
+python3 {script} --question "List the first three function names, one bullet each." --paths {path}
+Reply with that command's stdout only.
 """
 
 
@@ -123,7 +123,13 @@ def find_session(session_id: str | None) -> Path | None:
 
 
 def parent_payload(session: Path | None) -> dict:
-    out = {"context_tokens": None, "max_tool_result": 0, "file_in_parent": False, "hook_denied": False}
+    out = {
+        "context_tokens": None,
+        "max_tool_result": 0,
+        "file_in_parent": False,
+        "hook_denied": False,
+        "bulk_read_ran": False,
+    }
     if session is None:
         return out
     sig_path = session / "signals.json"
@@ -139,12 +145,19 @@ def parent_payload(session: Path | None) -> dict:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if obj.get("type") != "tool_result":
-            continue
+        kind = obj.get("type")
         body = obj.get("content") or ""
+        if kind == "tool_call":
+            blob = json.dumps(obj)
+            if "bulk-read" in blob:
+                out["bulk_read_ran"] = True
+        if kind != "tool_result":
+            continue
         out["max_tool_result"] = max(out["max_tool_result"], len(body))
         if "Hook denied:" in body and "shunt:" in body:
             out["hook_denied"] = True
+        if "bulk-read" in body or "shunt: MiniMax" in body:
+            out["bulk_read_ran"] = True
         if "def f50():" in body or "def f100():" in body:
             out["file_in_parent"] = True
     return out
@@ -168,11 +181,14 @@ def main() -> None:
     make_file(tmp, args.lines)
     lines = sum(1 for _ in tmp.open())
     cwd = str(tmp.parent)
-    prompt = PROMPT.format(path=str(tmp))
+    script = Path.home() / ".grok" / "plugins" / "shunt" / "scripts" / "bulk-read"
+    if not script.exists():
+        script = Path(__file__).resolve().parent / "bulk-read"
+    prompt = PROMPT.format(path=str(tmp), script=str(script))
     base_env = os.environ.copy()
     base_env.pop("SHUNT_DISABLE", None)
 
-    print(f"fixture {tmp}  lines={lines}", file=sys.stderr)
+    print(f"fixture {tmp}  lines={lines}  script={script}", file=sys.stderr)
     sock_dir = Path(tempfile.mkdtemp(prefix="shunt-sock-"))
     print("running SHUNT first (isolated leader)…", file=sys.stderr)
     env_on = base_env.copy()
@@ -182,7 +198,7 @@ def main() -> None:
         cwd,
         env_on,
         args.max_turns,
-        "read_file,spawn_subagent",
+        "read_file,run_terminal_command",
         str(sock_dir / "on.sock"),
     )
     s = frontier_tokens(on)
@@ -222,22 +238,30 @@ def main() -> None:
     print(
         f"shunt   context_tokens={s_pay.get('context_tokens')}  "
         f"max_tool_result={s_pay.get('max_tool_result')}  "
-        f"file_in_parent={s_pay.get('file_in_parent')}  hook_denied={s_pay.get('hook_denied')}"
+        f"file_in_parent={s_pay.get('file_in_parent')}  hook_denied={s_pay.get('hook_denied')}  "
+        f"bulk_read_ran={s_pay.get('bulk_read_ran')}"
     )
     saved = d["frontier_input"] - s["frontier_input"]
     pct = (100.0 * saved / d["frontier_input"]) if d["frontier_input"] else 0.0
     print()
-    print(f"ledger frontier input delta: {saved} tokens  ({pct:.0f}%)")
+    print(f"ledger frontier input delta: {saved} tokens  ({pct:.0f}%)  [informational; MiniMax is HTTP]")
     print("direct models:", json.dumps(d["models"], indent=2))
     print("shunt  models:", json.dumps(s["models"], indent=2))
     print("direct text:", d["text"].replace("\n", " | ")[:180])
     print("shunt  text:", s["text"].replace("\n", " | ")[:180])
-    if d_pay.get("file_in_parent") and not s_pay.get("file_in_parent") and s_pay.get("hook_denied"):
-        print("\nPASS: shunt kept the file body out of the parent.")
+    isolated = (
+        d_pay.get("file_in_parent")
+        and not s_pay.get("file_in_parent")
+        and s_pay.get("hook_denied")
+    )
+    if isolated and s_pay.get("bulk_read_ran"):
+        print("\nPASS: deny → bulk-read; file body stayed out of the parent.")
     elif s_pay.get("file_in_parent"):
         print("\nFAIL: file body still landed in the parent.")
+    elif isolated:
+        print("\nPARTIAL: hook denied and body stayed out, but bulk-read did not run.")
     else:
-        print("\nINCONCLUSIVE: check hook_denied / file_in_parent above.")
+        print("\nINCONCLUSIVE: check hook_denied / file_in_parent / bulk_read_ran above.")
 
 
 if __name__ == "__main__":

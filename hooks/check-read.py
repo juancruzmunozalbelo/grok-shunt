@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """PreToolUse gate: block untargeted large-file reads on the frontier session.
 
-Fail-open on parse errors, missing files, and timeouts (the harness also
-fail-opens). Explicit deny JSON is the only block. See README.
+Fail-open on parse errors, missing files, non-regular files, and timeouts
+(the harness also fail-opens). Explicit deny JSON is the only block.
 """
 from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
 DEFAULT_MIN_LINES = 350
-READERS = {"cat", "less", "more"}
-WINDOWED = {"head", "tail"}
+DEFAULT_MIN_BYTES = 65536
+DEFAULT_MAX_LIMIT = 120
+READERS = {"cat", "less", "more", "head", "tail"}
+PREFIXES = {"command", "env", "nice", "time", "exec", "nohup"}
+PIPE_MARKERS = ("|", "`", "$(", "<(")
 
 
 def allow() -> None:
@@ -26,24 +30,61 @@ def deny(reason: str) -> None:
     raise SystemExit(0)
 
 
-def min_lines() -> int:
-    raw = os.environ.get("SHUNT_MIN_LINES", str(DEFAULT_MIN_LINES))
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
     try:
         n = int(raw)
     except ValueError:
-        return DEFAULT_MIN_LINES
-    return n if n > 0 else DEFAULT_MIN_LINES
+        return default
+    return n if n > 0 else default
 
 
-def line_count(path: str) -> int | None:
+def min_lines() -> int:
+    return env_int("SHUNT_MIN_LINES", DEFAULT_MIN_LINES)
+
+
+def min_bytes() -> int:
+    return env_int("SHUNT_MIN_BYTES", DEFAULT_MIN_BYTES)
+
+
+def max_limit() -> int:
+    return env_int("SHUNT_MAX_LIMIT", DEFAULT_MAX_LIMIT)
+
+
+def disabled() -> bool:
+    raw = os.environ.get("SHUNT_DISABLE", "").strip().lower()
+    return raw in {"1", "true"}
+
+
+def file_stats(path: str) -> tuple[int, int] | None:
+    """(lines, bytes) for a regular file. None = skip (fail-open)."""
     try:
-        n = 0
-        with open(path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                n += chunk.count(b"\n")
-        return n
+        st = os.stat(path)
     except OSError:
         return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    size = int(st.st_size)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    n = 0
+    try:
+        while True:
+            try:
+                chunk = os.read(fd, 1 << 20)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            n += chunk.count(b"\n")
+    finally:
+        os.close(fd)
+    return n, size
 
 
 def resolve(path: str, cwd: str) -> str:
@@ -58,78 +99,167 @@ def strip_quotes(token: str) -> str:
     return token
 
 
-def bash_full_read_path(command: str) -> str | None:
-    """Return a path when the command is an untargeted full-file dump.
+def split_segments(command: str) -> list[str]:
+    segs: list[str] = []
+    buf: list[str] = []
+    quote = None
+    i = 0
+    while i < len(command):
+        c = command[i]
+        if quote:
+            buf.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in {"'", '"'}:
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        if c == "&" and i + 1 < len(command) and command[i + 1] == "&":
+            segs.append("".join(buf).strip())
+            buf = []
+            i += 2
+            continue
+        if c in {";", "\n"}:
+            segs.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    segs.append("".join(buf).strip())
+    return [s for s in segs if s]
 
-    `cat` / `less` / `more` of a single file, no pipes. `head`/`tail` pass:
-    they already window. Any `|`, `&&`, `;`, redirect, or substitution passes.
-    """
+
+def strip_prefixes(parts: list[str]) -> list[str]:
+    i = 0
+    while i < len(parts):
+        base = os.path.basename(strip_quotes(parts[i]))
+        if base not in PREFIXES:
+            break
+        i += 1
+        if base == "env":
+            while (
+                i < len(parts)
+                and "=" in parts[i]
+                and not parts[i].startswith("-")
+            ):
+                i += 1
+    return parts[i:]
+
+
+def extract_file_args(tokens: list[str]) -> list[str]:
+    files: list[str] = []
+    skip_next = False
+    for tok in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in {">", ">>", "2>", "&>"}:
+            skip_next = True
+            continue
+        if tok == "<":
+            continue
+        if tok == "--":
+            continue
+        if tok.startswith("-"):
+            continue
+        files.append(strip_quotes(tok))
+    return files
+
+
+def bash_read_paths(command: str) -> list[str]:
+    """Paths this command would dump in full. Empty = not a dump (allow)."""
     cmd = command.strip()
     if not cmd:
-        return None
-    if any(sep in cmd for sep in ("|", "&&", ";", "`", "$(", ">", "<", "\n")):
-        return None
-    parts = cmd.split()
-    if not parts:
-        return None
-    prog = os.path.basename(parts[0])
-    if prog in WINDOWED:
-        return None
-    if prog not in READERS:
-        return None
-    args = [p for p in parts[1:] if not p.startswith("-")]
-    if len(args) != 1:
-        return None
-    return strip_quotes(args[0])
+        return []
+    if any(m in cmd for m in PIPE_MARKERS):
+        return []
+    paths: list[str] = []
+    for segment in split_segments(cmd):
+        parts = segment.split()
+        if not parts:
+            continue
+        parts = strip_prefixes(parts)
+        if not parts:
+            continue
+        prog = os.path.basename(strip_quotes(parts[0]))
+        if prog not in READERS:
+            continue
+        paths.extend(extract_file_args(parts[1:]))
+    return paths
 
 
 def bulk_read_script() -> str:
-    # Keep the invoked path (symlink under ~/.grok/plugins/shunt when installed).
     return str(Path(__file__).parent.parent / "scripts" / "bulk-read")
 
 
-def deny_reason(path: str, n: int, threshold: int) -> str:
+def deny_reason(path: str, lines: int, size: int, lines_n: int, bytes_n: int) -> str:
     script = bulk_read_script()
     return (
-        f"shunt: {path} is {n} lines (threshold {threshold}). "
+        f"shunt: {path} is {lines} lines / {size} bytes "
+        f"(thresholds {lines_n} lines, {bytes_n} bytes). "
         "Do not Read or cat it. Run this command and keep only its stdout:\n"
         f'python3 {script} --question "<the user question>" --paths {path}\n'
-        "Use offset/limit only for a targeted edit window. Skill: bulk-reader."
+        "Use offset/limit only for a targeted edit window "
+        f"(limit ≤ {max_limit()}). Skill: bulk-reader."
     )
 
 
+def targeted_window(inp: dict) -> bool:
+    limit = inp.get("limit")
+    if limit is None:
+        return False
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        return False
+    return 0 < n <= max_limit()
+
+
+def over_threshold(path: str, cwd: str) -> tuple[str, int, int] | None:
+    full = resolve(path, cwd)
+    stats = file_stats(full)
+    if stats is None:
+        return None
+    lines, size = stats
+    if size > min_bytes() or lines > min_lines():
+        return full, lines, size
+    return None
+
+
 def decide(payload: dict) -> None:
-    if os.environ.get("SHUNT_DISABLE"):
-        allow()
-    if payload.get("subagentType"):
+    if disabled():
         allow()
 
     tool = payload.get("toolName") or ""
     inp = payload.get("toolInput") or {}
     cwd = payload.get("cwd") or payload.get("workspaceRoot") or os.getcwd()
-    threshold = min_lines()
-    path = None
+    hits: list[tuple[str, int, int]] = []
 
     if tool in {"read_file", "Read"}:
-        if inp.get("offset") is not None or inp.get("limit") is not None:
+        if targeted_window(inp):
             allow()
         path = inp.get("target_file") or inp.get("path")
-    elif tool in {"run_terminal_command", "Bash", "run_terminal_cmd"}:
-        path = bash_full_read_path(inp.get("command") or "")
-        if path is None:
+        if not path:
             allow()
+        hit = over_threshold(str(path), str(cwd))
+        if hit:
+            hits.append(hit)
+    elif tool in {"run_terminal_command", "Bash", "run_terminal_cmd"}:
+        for path in bash_read_paths(inp.get("command") or ""):
+            hit = over_threshold(path, str(cwd))
+            if hit:
+                hits.append(hit)
     else:
         allow()
 
-    if not path:
+    if not hits:
         allow()
-    full = resolve(str(path), str(cwd))
-    n = line_count(full)
-    if n is None:
-        allow()
-    if n <= threshold:
-        allow()
-    deny(deny_reason(full, n, threshold))
+    full, lines, size = hits[0]
+    deny(deny_reason(full, lines, size, min_lines(), min_bytes()))
 
 
 def main() -> None:
