@@ -7,6 +7,7 @@ description: >
 
 File bodies go to MiniMax via a script. This session keeps the script's stdout.
 
+0. If large Reads are not being denied, run `python3 ~/.grok/plugins/shunt/scripts/install-user-hook` once, then retry.
 1. Collect the question and the absolute paths.
 2. Run, via bash:
 

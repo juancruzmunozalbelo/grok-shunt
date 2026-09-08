@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -15,9 +16,18 @@ from pathlib import Path
 DEFAULT_MIN_LINES = 350
 DEFAULT_MIN_BYTES = 65536
 DEFAULT_MAX_LIMIT = 120
-READERS = {"cat", "less", "more", "head", "tail"}
+READERS = {"cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg"}
 PREFIXES = {"command", "env", "nice", "time", "exec", "nohup"}
 PIPE_MARKERS = ("|", "`", "$(", "<(")
+SHUNT_MARKERS = (
+    "bulk-read",
+    "code-write",
+    "check-read.py",
+    "shunt_worker.py",
+    "install-user-hook",
+    "bench_tokens.py",
+)
+PATHISH = re.compile(r"(?:~|/|\./|\.\./)[^\s'\"();|&<>]+")
 
 
 def allow() -> None:
@@ -170,12 +180,39 @@ def extract_file_args(tokens: list[str]) -> list[str]:
     return files
 
 
+def is_shunt_invocation(command: str) -> bool:
+    return any(marker in command for marker in SHUNT_MARKERS)
+
+
+def interpreter_dump_paths(parts: list[str], segment: str) -> list[str]:
+    """Paths named inside python -c / perl -e / ruby -e / node -e."""
+    prog = os.path.basename(strip_quotes(parts[0]))
+    if prog.startswith("python"):
+        flag = "-c"
+    elif prog in {"perl", "ruby", "node"}:
+        flag = "-e"
+    else:
+        return []
+    if flag not in parts:
+        return []
+    skip = {strip_quotes(parts[0]), os.path.abspath(strip_quotes(parts[0]))}
+    found: list[str] = []
+    for m in PATHISH.finditer(segment):
+        raw = m.group(0)
+        if raw in skip or os.path.basename(raw) == prog:
+            continue
+        found.append(raw)
+    return found
+
+
 def bash_read_paths(command: str) -> list[str]:
     """Paths this command would dump in full. Empty = not a dump (allow)."""
     cmd = command.strip()
     if not cmd:
         return []
     if any(m in cmd for m in PIPE_MARKERS):
+        return []
+    if is_shunt_invocation(cmd):
         return []
     paths: list[str] = []
     for segment in split_segments(cmd):
@@ -186,9 +223,9 @@ def bash_read_paths(command: str) -> list[str]:
         if not parts:
             continue
         prog = os.path.basename(strip_quotes(parts[0]))
-        if prog not in READERS:
-            continue
-        paths.extend(extract_file_args(parts[1:]))
+        paths.extend(interpreter_dump_paths(parts, segment))
+        if prog in READERS:
+            paths.extend(extract_file_args(parts[1:]))
     return paths
 
 
@@ -243,6 +280,13 @@ def decide(payload: dict) -> None:
         if targeted_window(inp):
             allow()
         path = inp.get("target_file") or inp.get("path")
+        if not path:
+            allow()
+        hit = over_threshold(str(path), str(cwd))
+        if hit:
+            hits.append(hit)
+    elif tool in {"grep", "Grep"}:
+        path = inp.get("path")
         if not path:
             allow()
         hit = over_threshold(str(path), str(cwd))

@@ -1,0 +1,2 @@
+description = "Turn on the shunt read gate (needed on Grok 1.0.13 after plugin install)"
+prompt = "Run `python3 ~/.grok/plugins/shunt/scripts/install-user-hook` via bash and tell the user the path it wrote. If that path is missing, run the `scripts/install-user-hook` next to the shunt plugin. Do not Read large files first."

@@ -12,7 +12,7 @@ This is not Portal and it does not claim 90% savings.
 grok plugin install juancruzmunozalbelo/grok-shunt --trust
 ```
 
-Enable it:
+Enable it (`plugins` stay off until listed):
 
 ```toml
 # ~/.grok/config.toml
@@ -20,26 +20,13 @@ Enable it:
 enabled = ["shunt"]
 ```
 
-Grok 1.0.13 discovers plugin hooks but does not run them as PreToolUse. Point a **user** hook at the plugin symlink (not a hashed install dir):
+Grok 1.0.13 discovers plugin hooks but does not run them as PreToolUse. One extra command writes the user hook (pointing at the plugin symlink):
 
 ```bash
-python3 - <<'PY'
-from pathlib import Path
-import json
-home = Path.home()
-path = home / ".grok" / "hooks" / "shunt.json"
-path.parent.mkdir(parents=True, exist_ok=True)
-cmd = str(home / ".grok" / "plugins" / "shunt" / "hooks" / "check-read.py")
-path.write_text(json.dumps({
-    "hooks": {"PreToolUse": [{"matcher": "read_file|Read|run_terminal_command|Bash",
-        "hooks": [{"type": "command", "command": cmd, "timeout": 10}]}]}
-}, indent=2) + "\n")
-print("wrote", path)
-print("command", cmd)
-PY
+python3 ~/.grok/plugins/shunt/scripts/install-user-hook
 ```
 
-Start a new Grok session.
+Or in a Grok session: `/shunt-enable`. Start a new session after that.
 
 You also need a MiniMax key (not shipped):
 
@@ -53,7 +40,7 @@ Any OpenAI-compatible endpoint works via `SHUNT_BASE_URL` / `SHUNT_MODEL`.
 
 | Layer | Role |
 | --- | --- |
-| Hook `hooks/check-read.py` | Denies untargeted `read_file` of a large file (over `SHUNT_MIN_LINES` or `SHUNT_MIN_BYTES`). Denies `cat` / `head` / `tail` / `less` / `more`, including `cat f && true` and multi-file `cat`. Pipes pass. Targeted `read_file` passes only when `limit` is set and `limit ≤ SHUNT_MAX_LIMIT`. |
+| Hook `hooks/check-read.py` | Denies untargeted `read_file` of a large file (over `SHUNT_MIN_LINES` or `SHUNT_MIN_BYTES`). Denies `cat` / `head` / `tail` / `less` / `more` / `grep` / `rg`, including `cat f && true` and multi-file `cat`. Denies the `grep` tool on a large **file** (directories pass). Denies `python3 -c` that names a large file. Pipes pass. `bulk-read` / `code-write` pass. Targeted `read_file` passes only when `limit` is set and `limit ≤ SHUNT_MAX_LIMIT`. |
 | `scripts/bulk-read` | Packs files into an XML prompt, POSTs to MiniMax, prints bullets on stdout. Usage on stderr. |
 | `scripts/code-write` | Requires `--reference`. MiniMax returns code; **this script** writes `--target` after stripping fences. Stdout is `wrote <path>` only. |
 | Skills | Tell the frontier to run those scripts after a deny. |

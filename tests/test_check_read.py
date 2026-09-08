@@ -8,7 +8,9 @@ import time
 import unittest
 from pathlib import Path
 
-HOOK = Path(__file__).resolve().parents[1] / "hooks" / "check-read.py"
+ROOT = Path(__file__).resolve().parents[1]
+HOOK = ROOT / "hooks" / "check-read.py"
+INSTALL = ROOT / "scripts" / "install-user-hook"
 
 
 def run_hook(
@@ -212,6 +214,45 @@ class CheckReadTests(unittest.TestCase):
             self.assertEqual(out["decision"], "allow")
             self.assertLess(elapsed, 1.5)
 
+    def test_grep_tool_large_file_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = big_file(tmp, 800)
+            _, out = run_hook(
+                {"toolName": "grep", "toolInput": {"pattern": "^def ", "path": path}}
+            )
+            self.assertEqual(out["decision"], "deny")
+
+    def test_grep_tool_dir_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            big_file(tmp, 800)
+            _, out = run_hook(
+                {"toolName": "grep", "toolInput": {"pattern": "foo", "path": tmp}}
+            )
+            self.assertEqual(out["decision"], "allow")
+
+    def test_bash_grep_file_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = big_file(tmp, 800)
+            _, out = run_hook(bash(f"grep foo {path}"))
+            self.assertEqual(out["decision"], "deny")
+
+    def test_python_c_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = big_file(tmp, 800)
+            _, out = run_hook(
+                bash(f'python3 -c "print(open({path!r}).read())"')
+            )
+            self.assertEqual(out["decision"], "deny")
+
+    def test_python_bulk_read_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = big_file(tmp, 800)
+            script = Path(__file__).resolve().parents[1] / "scripts" / "bulk-read"
+            _, out = run_hook(
+                bash(f"python3 {script} --question q --paths {path}")
+            )
+            self.assertEqual(out["decision"], "allow")
+
     def test_bad_json_fail_open(self) -> None:
         proc = subprocess.run(
             [sys.executable, str(HOOK)],
@@ -221,6 +262,29 @@ class CheckReadTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(json.loads(proc.stdout)["decision"], "allow")
+
+
+class InstallUserHookTests(unittest.TestCase):
+    def test_writes_matcher_with_grep(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["GROK_PLUGIN_ROOT"] = str(ROOT)
+            proc = subprocess.run(
+                [sys.executable, str(INSTALL)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            dest = home / ".grok" / "hooks" / "shunt.json"
+            data = json.loads(dest.read_text(encoding="utf-8"))
+            matcher = data["hooks"]["PreToolUse"][0]["matcher"]
+            self.assertIn("grep", matcher)
+            cmd = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            self.assertTrue(cmd.endswith("check-read.py"))
 
 
 if __name__ == "__main__":

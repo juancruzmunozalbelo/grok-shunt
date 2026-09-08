@@ -1,8 +1,19 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../scripts/install-user-hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "read_file|Read|run_terminal_command|Bash",
+        "matcher": "read_file|Read|run_terminal_command|Bash|grep|Grep",
         "hooks": [
           {
             "type": "command",

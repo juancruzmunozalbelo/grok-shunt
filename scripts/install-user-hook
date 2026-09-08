@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Write ~/.grok/hooks/shunt.json so the gate fires on Grok 1.0.13.
+
+Plugin hooks.json is discovered but not run as PreToolUse. This user hook
+points at the plugin symlink, which survives `grok plugin update`.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def plugin_root() -> Path:
+    env = os.environ.get("GROK_PLUGIN_ROOT")
+    if env:
+        return Path(env)
+    home_plugin = Path.home() / ".grok" / "plugins" / "shunt"
+    if (home_plugin / "hooks" / "check-read.py").is_file():
+        return home_plugin
+    return Path(__file__).resolve().parent.parent
+
+
+def hook_body(check_read: Path) -> dict:
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "read_file|Read|run_terminal_command|Bash|grep|Grep",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": str(check_read),
+                            "timeout": 10,
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+
+def main() -> int:
+    root = plugin_root()
+    check_read = root / "hooks" / "check-read.py"
+    if not check_read.is_file():
+        sys.stderr.write(f"shunt: missing {check_read}\n")
+        return 1
+    dest = Path.home() / ".grok" / "hooks" / "shunt.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(hook_body(check_read), indent=2) + "\n", encoding="utf-8")
+    sys.stdout.write(f"wrote {dest}\ncommand {check_read}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
