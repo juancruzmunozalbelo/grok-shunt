@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Generate one file on MiniMax. Write it on this machine. Print the path.
+
+The worker never opens the disk. This script writes --target after stripping
+markdown fences. The frontier should not Read the target back.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shunt_worker import (  # noqa: E402
+    chat,
+    die,
+    pack_files,
+    report_usage,
+    strip_fences,
+)
+
+SYSTEM = """You generate one code file from a spec and a required reference file.
+Match the reference's patterns, conventions, naming, and style exactly.
+Output only the code — no explanations, no markdown fences unless the file itself needs them.
+If the spec is ambiguous, make reasonable choices that match the reference. Do not ask."""
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="code-write",
+        description="Shunt boilerplate generation off the frontier onto MiniMax.",
+    )
+    parser.add_argument("--spec", required=True)
+    parser.add_argument(
+        "--reference",
+        required=True,
+        help="Existing file whose patterns the worker must match.",
+    )
+    parser.add_argument(
+        "--target",
+        required=True,
+        help="Path this script will write. MiniMax never opens it.",
+    )
+    args = parser.parse_args(argv)
+    ref = Path(args.reference)
+    if not ref.is_file():
+        die(f"--reference is required and must exist: {ref}", 1)
+    packed = pack_files([str(ref)])
+    user = (
+        f"Spec:\n{args.spec.strip()}\n\n"
+        f"Write the full contents of {args.target}.\n\n"
+        f"Reference:\n{packed}"
+    )
+    text, usage = chat(
+        [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user},
+        ]
+    )
+    report_usage(usage)
+    body = strip_fences(text)
+    if not body.strip():
+        die("worker returned empty code", 1)
+    target = Path(args.target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    n = body.count("\n")
+    sys.stderr.write(f"shunt: wrote {n} lines to {target.resolve()}\n")
+    sys.stdout.write(f"wrote {target.resolve()}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

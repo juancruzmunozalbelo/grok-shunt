@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
+from pathlib import Path
 
 DEFAULT_MIN_LINES = 350
 READERS = {"cat", "less", "more"}
@@ -83,11 +83,17 @@ def bash_full_read_path(command: str) -> str | None:
     return strip_quotes(args[0])
 
 
+def bulk_read_script() -> str:
+    # Keep the invoked path (symlink under ~/.grok/plugins/shunt when installed).
+    return str(Path(__file__).parent.parent / "scripts" / "bulk-read")
+
+
 def deny_reason(path: str, n: int, threshold: int) -> str:
+    script = bulk_read_script()
     return (
         f"shunt: {path} is {n} lines (threshold {threshold}). "
-        "Do not Read it into the frontier. Spawn a subagent with "
-        'subagent_type "shunt:bulk-reader", the user question, and this path. '
+        "Do not Read or cat it. Run this command and keep only its stdout:\n"
+        f'python3 {script} --question "<the user question>" --paths {path}\n'
         "Use offset/limit only for a targeted edit window. Skill: bulk-reader."
     )
 

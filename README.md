@@ -1,10 +1,10 @@
 # shunt
 
-A [Grok Build](https://x.ai) plugin that keeps large file bodies and boilerplate generation off the **frontier** model.
+A [Grok Build](https://x.ai) plugin that keeps large file bodies and boilerplate off the **frontier** model (grok-4.6).
 
-Inspired by [Portal by Spotify cut my Claude Code token usage by 90%](https://engineering.atspotify.com/2026/9/portal-by-spotify-cut-my-claude-code-token-usage-by-90). Same idea, no Portal: a `PreToolUse` hook blocks untargeted large reads, and skills spawn a cheaper **worker** subagent whose files never enter the parent context.
+Same idea as [Portal by Spotify](https://engineering.atspotify.com/2026/9/portal-by-spotify-cut-my-claude-code-token-usage-by-90): a hook blocks untargeted large reads, then a **script** sends the files to a cheap worker over HTTP. MiniMax never gets your disk. The frontier only sees the script's stdout (bullets, or `wrote /path`).
 
-The worker's **last message** does enter the parent. The bulk-reader agent is instructed to return short bullets, not file dumps.
+This is not Portal and it does not claim 90% savings.
 
 ## Install
 
@@ -12,7 +12,7 @@ The worker's **last message** does enter the parent. The bulk-reader agent is in
 grok plugin install juancruzmunozalbelo/grok-shunt --trust
 ```
 
-Then enable it (`plugins` stay off until listed):
+Enable it:
 
 ```toml
 # ~/.grok/config.toml
@@ -20,60 +20,82 @@ Then enable it (`plugins` stay off until listed):
 enabled = ["shunt"]
 ```
 
-Start a new Grok session. Trust is automatic for plugins under `~/.grok/plugins/` after install with `--trust`.
+Grok 1.0.13 discovers plugin hooks but does not run them as PreToolUse. Point a **user** hook at the plugin symlink (not a hashed install dir):
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import json
+home = Path.home()
+path = home / ".grok" / "hooks" / "shunt.json"
+path.parent.mkdir(parents=True, exist_ok=True)
+cmd = str(home / ".grok" / "plugins" / "shunt" / "hooks" / "check-read.py")
+path.write_text(json.dumps({
+    "hooks": {"PreToolUse": [{"matcher": "read_file|Read|run_terminal_command|Bash",
+        "hooks": [{"type": "command", "command": cmd, "timeout": 10}]}]}
+}, indent=2) + "\n")
+print("wrote", path)
+print("command", cmd)
+PY
+```
+
+Start a new Grok session.
+
+You also need a MiniMax key (not shipped):
+
+```bash
+export MINIMAX_API_KEY=...    # or put it in ~/.grok/minimax.env (mode 600)
+```
+
+Any OpenAI-compatible endpoint works via `SHUNT_BASE_URL` / `SHUNT_MODEL`.
 
 ## What it does
 
 | Layer | Role |
 | --- | --- |
-| Hook `hooks/check-read.py` | Denies `read_file` without `offset`/`limit` when the file is over `SHUNT_MIN_LINES` (default 350). Denies `cat` / `less` / `more` of a large file. Pipes, `head`, `tail`, and targeted reads pass. Subagent sessions pass, so the worker can still read. |
-| Skill `bulk-reader` | Tells the frontier to `spawn_subagent` with `subagent_type: shunt:bulk-reader`. |
-| Agent `bulk-reader` | Read-only worker. Structured bullets only. |
-| Skill + agent `code-writer` | Boilerplate from a **required** reference file. Writes to disk. Parent should not Read the result. |
+| Hook `hooks/check-read.py` | Denies `read_file` without `offset`/`limit` when the file is over `SHUNT_MIN_LINES` (default 350). Denies `cat` / `less` / `more` of a large file. Pipes, `head`, `tail`, and targeted reads pass. |
+| `scripts/bulk-read` | Packs files into an XML prompt, POSTs to MiniMax, prints bullets on stdout. Usage on stderr. |
+| `scripts/code-write` | Requires `--reference`. MiniMax returns code; **this script** writes `--target` after stripping fences. Stdout is `wrote <path>` only. |
+| Skills | Tell the frontier to run those scripts after a deny, not `spawn_subagent`. |
+
+Follow-up: run `bulk-read` again with the same `--paths` and a new `--question`. Each call is one shot.
 
 Not shunted: edits, debugging, architecture. After a bulk-read, change a section with `read_file` `offset`/`limit`.
 
-## Worker model
+## Worker
 
-Agents default to `grok-4.5` so the plugin works with stock Grok. That model is **not** cheaper per token than grok-4.6; it only drops `xhigh` and keeps the corpus out of the parent window.
-
-To send the worker to a model you already pay less for (or have free), pin it in *your* config. Example with MiniMax M3 — **you supply the key**, this repo never ships one:
-
-```toml
-[model.minimax-m3]
-model = "MiniMax-M3"
-base_url = "https://api.minimax.io/v1"
-name = "MiniMax M3"
-api_backend = "chat_completions"
-env_key = "MINIMAX_API_KEY"
-context_window = 1000000
-temperature = 0.2
-supports_backend_search = false
-
-[subagents.models]
-"shunt:bulk-reader" = "minimax-m3"
-"shunt:code-writer" = "minimax-m3"
-```
+Default: `MiniMax-M3` at `https://api.minimax.io/v1`. The model only sees text you packed. It has no `search_replace`, no bash, no `$HOME`.
 
 ```bash
-export MINIMAX_API_KEY=...   # Token Plan or pay-as-you-go; never commit this
+python3 ~/.grok/plugins/shunt/scripts/bulk-read \
+  --question "What does this service do?" \
+  --paths src/Service.java src/Handler.java
+
+python3 ~/.grok/plugins/shunt/scripts/code-write \
+  --spec "Write tests for UserService" \
+  --reference tests/OrderTest.java \
+  --target tests/UserTest.java
 ```
 
-Any OpenAI-compatible endpoint works the same way. Do not run `mmx agent setup` for Grok if you want grok-4.6 to stay the session default — that wizard rewrites the default model.
+The leftover `agents/` subagents still exist if you spawn them, but that puts MiniMax on your machine with tools. Prefer the scripts.
 
 ## Env
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SHUNT_MIN_LINES` | `350` | Untargeted reads of files with more lines are denied. |
-| `SHUNT_DISABLE` | unset | Set to `1` to allow every read (hook still runs, then allows). |
+| `SHUNT_DISABLE` | unset | Set to `1` to allow every read. |
+| `MINIMAX_API_KEY` | — | Worker key. Also read from `~/.grok/minimax.env`. |
+| `SHUNT_MODEL` | `MiniMax-M3` | OpenAI-compat model name. |
+| `SHUNT_BASE_URL` | `https://api.minimax.io/v1` | Chat completions base. |
+| `SHUNT_TIMEOUT_SECONDS` | `120` | Worker HTTP timeout. |
+| `SHUNT_MAX_BYTES` | `8000000` | Max packed file bytes per call; split larger jobs. |
 
 ## Disable / uninstall
 
 ```bash
-# leave installed but inert
 # ~/.grok/config.toml — drop "shunt" from [plugins].enabled
-
+rm ~/.grok/hooks/shunt.json
 grok plugin uninstall shunt --confirm
 ```
 
@@ -82,10 +104,7 @@ grok plugin uninstall shunt --confirm
 ```bash
 python3 -m unittest discover -s tests -v
 grok plugin validate .
-python3 scripts/bench_tokens.py --lines 800
 ```
-
-`bench_tokens.py` runs two isolated `grok -p` sessions (shunt on vs `SHUNT_DISABLE=1`) and prints frontier vs worker tokens plus whether the file body leaked into the parent. Headless often cannot spawn `shunt:bulk-reader`; the leak/deny columns are the ones that validate the hook.
 
 Hook fail-open: invalid JSON or a missing file does not block. Only an explicit deny JSON blocks.
 

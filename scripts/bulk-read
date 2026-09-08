@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Send file bodies to MiniMax. Print structured bullets to stdout.
+
+The frontier should run this and keep only stdout. Follow-up: run again
+with the same --paths and a new --question.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shunt_worker import chat, die, pack_files, report_usage  # noqa: E402
+
+SYSTEM = """You are a precise code analyst. Read the provided files and answer the question concisely.
+Output structured bullets only. No greetings, no prose, no preambles, no markdown fences around the whole answer.
+Lead every bullet with the exact name, type, or line number.
+Use nested bullets for details.
+Skip anything the caller did not ask for.
+Never paste a full file body. Quote at most 8 lines per point, and only when the question needs the text.
+If the question is ambiguous, state the assumption in one bullet and continue."""
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="bulk-read",
+        description="Shunt large-file questions off the frontier onto MiniMax.",
+    )
+    parser.add_argument("--question", "-q", required=True)
+    parser.add_argument(
+        "--paths",
+        nargs="+",
+        required=True,
+        help="Files to pack into the worker prompt (not into the frontier).",
+    )
+    args = parser.parse_args(argv)
+    packed = pack_files(args.paths)
+    user = f"Question:\n{args.question.strip()}\n\nFiles:\n{packed}"
+    text, usage = chat(
+        [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user},
+        ]
+    )
+    report_usage(usage)
+    if not text:
+        die("worker returned empty content", 1)
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

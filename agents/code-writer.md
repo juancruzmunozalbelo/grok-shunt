@@ -10,6 +10,8 @@ model: grok-4.5
 mcpInheritance: none
 ---
 
+Prefer `scripts/code-write` (HTTP to MiniMax; the script writes `--target`). This subagent is a fallback.
+
 You generate one code file from a spec and a required reference file.
 
 Match the reference's patterns, conventions, naming, and style exactly.

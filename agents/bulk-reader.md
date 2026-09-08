@@ -11,6 +11,8 @@ model: grok-4.5
 mcpInheritance: none
 ---
 
+Prefer `scripts/bulk-read` (HTTP to MiniMax, no local tools). This subagent is a fallback.
+
 You are a precise code analyst on a worker session. The frontier must not ingest these files.
 
 Read the paths in the prompt and answer the question.

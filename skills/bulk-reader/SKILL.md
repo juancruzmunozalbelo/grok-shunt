@@ -5,16 +5,17 @@ description: >
   a question spans large files, or the user says bulk-read / shunt.
 ---
 
-The file bodies stay in a worker subagent. The parent keeps a short bullet report.
+File bodies go to MiniMax via a script. This session keeps the script's stdout.
 
-1. Collect the question and the paths (from the user, or from the hook deny reason).
-2. Call `spawn_subagent` with:
-   - `subagent_type`: `shunt:bulk-reader`
-   - `description`: a 3–5 word label
-   - `prompt`: the question, then a list of absolute paths
-3. Return the worker's bullets to the user. Do not Read the files into this session.
-4. Follow-up on the same files: `resume_from` that subagent id. Do not re-Read.
+1. Collect the question and the absolute paths.
+2. Run, via bash:
 
-Targeted edit after understanding: `read_file` with `offset` and `limit` on the section you will change. Do not spawn for that window.
+```
+python3 ~/.grok/plugins/shunt/scripts/bulk-read --question "<question>" --paths <path> [path...]
+```
 
-If `shunt:bulk-reader` is missing, install and enable the shunt plugin.
+If that path is missing, use the `scripts/bulk-read` next to the plugin's `hooks/check-read.py` (the deny reason prints it).
+3. Return the stdout bullets. Do not Read or cat the files.
+4. Follow-up on the same files: run the same command again with a new `--question` and the same `--paths`.
+
+Targeted edit after understanding: `read_file` with `offset` and `limit` on the section you will change.

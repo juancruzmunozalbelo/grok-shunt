@@ -58,7 +58,8 @@ class CheckReadTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             self.assertEqual(out["decision"], "deny")
-            self.assertIn("shunt:bulk-reader", out["reason"])
+            self.assertIn("bulk-read", out["reason"])
+            self.assertIn("--paths", out["reason"])
             self.assertIn("800", out["reason"])
 
     def test_small_file_allowed(self) -> None:
