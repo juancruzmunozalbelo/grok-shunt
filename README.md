@@ -40,7 +40,7 @@ Any OpenAI-compatible endpoint works via `SHUNT_BASE_URL` / `SHUNT_MODEL`.
 
 | Layer | Role |
 | --- | --- |
-| Hook `hooks/check-read.py` | Denies untargeted `read_file` of a large file (over `SHUNT_MIN_LINES` or `SHUNT_MIN_BYTES`). Denies `cat` / `head` / `tail` / `less` / `more` / `grep` / `rg`, including `cat f && true` and multi-file `cat`. Denies the `grep` tool on a large **file** (directories pass). Denies `python3 -c` that names a large file. Pipes pass. `bulk-read` / `code-write` pass. Targeted `read_file` passes only when `limit` is set and `limit ≤ SHUNT_MAX_LIMIT`. |
+| Hook `hooks/check-read.py` | Denies untargeted `read_file` of a large file (over `SHUNT_MIN_LINES` or `SHUNT_MIN_BYTES`). Denies `cat` / `head` / `tail` / `less` / `more` / `grep` / `rg`, including `cat f && true` and multi-file `cat`. Denies the `grep` tool on a large **file** (directories pass). Denies `python3 -c` that names a large file, including a relative path in quotes. A pipe passes only when its last command is a filter (`grep`, `head`, `wc`, …); `cat FILE` piped to `cat` is denied. `bulk-read` / `code-write` pass. Targeted `read_file` passes only when `limit` is set and `limit ≤ SHUNT_MAX_LIMIT`. |
 | `scripts/bulk-read` | Packs files into an XML prompt, POSTs to MiniMax, prints bullets on stdout. Usage on stderr. |
 | `scripts/code-write` | Requires `--reference`. MiniMax returns code; **this script** writes `--target` after stripping fences. Stdout is `wrote <path>` only. |
 | Skills | Tell the frontier to run those scripts after a deny. |

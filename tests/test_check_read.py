@@ -39,8 +39,14 @@ def run_hook(
     return proc.returncode, out
 
 
-def bash(command: str) -> dict:
-    return {"toolName": "run_terminal_command", "toolInput": {"command": command}}
+def bash(command: str, cwd: str | None = None) -> dict:
+    payload: dict = {
+        "toolName": "run_terminal_command",
+        "toolInput": {"command": command},
+    }
+    if cwd:
+        payload["cwd"] = cwd
+    return payload
 
 
 def big_file(dirpath: str, lines: int, name: str = "big.txt") -> str:
@@ -115,6 +121,29 @@ class CheckReadTests(unittest.TestCase):
             self.assertEqual(dump["decision"], "deny")
             _, piped = run_hook(bash(f"cat {path} | grep foo"))
             self.assertEqual(piped["decision"], "allow")
+
+    def test_cat_pipe_cat_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = big_file(tmp, 800)
+            _, out = run_hook(bash(f"cat {path} | cat"))
+            self.assertEqual(out["decision"], "deny")
+            _, tee = run_hook(bash(f"cat {path} | tee"))
+            self.assertEqual(tee["decision"], "deny")
+
+    def test_cat_pipe_head_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = big_file(tmp, 800)
+            _, out = run_hook(bash(f"cat {path} | head"))
+            self.assertEqual(out["decision"], "allow")
+            _, counted = run_hook(bash(f"cat {path} | wc -l"))
+            self.assertEqual(counted["decision"], "allow")
+
+    def test_filter_then_cat_still_denies_other_dump(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = big_file(tmp, 800)
+            other = big_file(tmp, 800, "other.txt")
+            _, out = run_hook(bash(f"cat {path} | grep foo && cat {other}"))
+            self.assertEqual(out["decision"], "deny")
 
     def test_head_denied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -242,6 +271,20 @@ class CheckReadTests(unittest.TestCase):
             _, out = run_hook(
                 bash(f'python3 -c "print(open({path!r}).read())"')
             )
+            self.assertEqual(out["decision"], "deny")
+
+    def test_python_c_relative_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            big_file(tmp, 800, "big.py")
+            _, out = run_hook(
+                bash("python3 -c \"print(open('big.py').read())\"", cwd=tmp)
+            )
+            self.assertEqual(out["decision"], "deny")
+
+    def test_bulk_read_in_filename_still_denies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = big_file(tmp, 800, "notes-bulk-read.md")
+            _, out = run_hook(bash(f"cat {path}"))
             self.assertEqual(out["decision"], "deny")
 
     def test_python_bulk_read_allowed(self) -> None:

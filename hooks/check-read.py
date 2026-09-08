@@ -17,17 +17,35 @@ DEFAULT_MIN_LINES = 350
 DEFAULT_MIN_BYTES = 65536
 DEFAULT_MAX_LIMIT = 120
 READERS = {"cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg"}
+REDUCERS = {
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "awk",
+    "gawk",
+    "sed",
+    "cut",
+    "wc",
+    "sort",
+    "uniq",
+    "jq",
+    "tr",
+    "head",
+    "tail",
+}
 PREFIXES = {"command", "env", "nice", "time", "exec", "nohup"}
-PIPE_MARKERS = ("|", "`", "$(", "<(")
-SHUNT_MARKERS = (
+SUBST_MARKERS = ("`", "$(", "<(")
+SHUNT_MARKERS = {
     "bulk-read",
     "code-write",
     "check-read.py",
     "shunt_worker.py",
     "install-user-hook",
     "bench_tokens.py",
-)
+}
 PATHISH = re.compile(r"(?:~|/|\./|\.\./)[^\s'\"();|&<>]+")
+QUOTED = re.compile(r"""(['"])([^'"]+)\1""")
 
 
 def allow() -> None:
@@ -143,6 +161,48 @@ def split_segments(command: str) -> list[str]:
     return [s for s in segs if s]
 
 
+def split_on_pipe(command: str) -> list[str]:
+    segs: list[str] = []
+    buf: list[str] = []
+    quote = None
+    i = 0
+    while i < len(command):
+        c = command[i]
+        if quote:
+            buf.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in {"'", '"'}:
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        if c == "|" and not (
+            i + 1 < len(command) and command[i + 1] in {"|", "&"}
+        ):
+            segs.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    segs.append("".join(buf).strip())
+    return [s for s in segs if s]
+
+
+def pipeline_filters(segment: str) -> bool:
+    """True when the last pipe command shrinks stdout (grep, head, wc, …)."""
+    pieces = split_on_pipe(segment)
+    if len(pieces) < 2:
+        return False
+    parts = strip_prefixes(pieces[-1].split())
+    if not parts:
+        return False
+    return os.path.basename(strip_quotes(parts[0])) in REDUCERS
+
+
 def strip_prefixes(parts: list[str]) -> list[str]:
     i = 0
     while i < len(parts):
@@ -181,7 +241,12 @@ def extract_file_args(tokens: list[str]) -> list[str]:
 
 
 def is_shunt_invocation(command: str) -> bool:
-    return any(marker in command for marker in SHUNT_MARKERS)
+    for segment in split_segments(command):
+        for piece in split_on_pipe(segment):
+            for tok in piece.split():
+                if os.path.basename(strip_quotes(tok)) in SHUNT_MARKERS:
+                    return True
+    return False
 
 
 def interpreter_dump_paths(parts: list[str], segment: str) -> list[str]:
@@ -202,6 +267,11 @@ def interpreter_dump_paths(parts: list[str], segment: str) -> list[str]:
         if raw in skip or os.path.basename(raw) == prog:
             continue
         found.append(raw)
+    for m in QUOTED.finditer(segment):
+        raw = m.group(2).strip()
+        if not raw or raw in skip or "(" in raw or ")" in raw:
+            continue
+        found.append(raw)
     return found
 
 
@@ -210,22 +280,25 @@ def bash_read_paths(command: str) -> list[str]:
     cmd = command.strip()
     if not cmd:
         return []
-    if any(m in cmd for m in PIPE_MARKERS):
+    if any(m in cmd for m in SUBST_MARKERS):
         return []
     if is_shunt_invocation(cmd):
         return []
     paths: list[str] = []
     for segment in split_segments(cmd):
-        parts = segment.split()
-        if not parts:
+        if pipeline_filters(segment):
             continue
-        parts = strip_prefixes(parts)
-        if not parts:
-            continue
-        prog = os.path.basename(strip_quotes(parts[0]))
-        paths.extend(interpreter_dump_paths(parts, segment))
-        if prog in READERS:
-            paths.extend(extract_file_args(parts[1:]))
+        for piece in split_on_pipe(segment):
+            parts = piece.split()
+            if not parts:
+                continue
+            parts = strip_prefixes(parts)
+            if not parts:
+                continue
+            prog = os.path.basename(strip_quotes(parts[0]))
+            paths.extend(interpreter_dump_paths(parts, piece))
+            if prog in READERS:
+                paths.extend(extract_file_args(parts[1:]))
     return paths
 
 
