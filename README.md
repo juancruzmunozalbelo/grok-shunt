@@ -20,7 +20,7 @@ Enable it (`plugins` stay off until listed):
 enabled = ["shunt"]
 ```
 
-Grok 1.0.13 discovers plugin hooks but does not run them as PreToolUse. One extra command writes the user hook (pointing at the plugin symlink):
+Grok 1.0.13 discovers plugin hooks but does not always run them. One extra command writes the user hook (PreToolUse + PostToolUse, pointing at the plugin symlink):
 
 ```bash
 python3 ~/.grok/plugins/shunt/scripts/install-user-hook
@@ -40,10 +40,10 @@ Any OpenAI-compatible endpoint works via `SHUNT_BASE_URL` / `SHUNT_MODEL`.
 
 | Layer | Role |
 | --- | --- |
-| Hook `hooks/check-read.py` | Denies untargeted `read_file` of a large file (over `SHUNT_MIN_LINES` or `SHUNT_MIN_BYTES`). Denies `cat` / `head` / `tail` / `less` / `more` / `grep` / `rg`, including `cat f && true` and multi-file `cat`. Denies the `grep` tool on a large **file** (directories pass). Denies `python3 -c` that names a large file, including a relative path in quotes. A pipe passes only when its last command is a filter (`grep`, `head`, `wc`, …); `cat FILE` piped to `cat` is denied. `bulk-read` / `code-write` pass. Targeted `read_file` passes only when `limit` is set and `limit ≤ SHUNT_MAX_LIMIT`. |
+| Hook `hooks/check-read.py` | **PreToolUse allows** (no deny turn). **PostToolUse** replaces the model's copy of a dump (`read_file` without a small `limit`, `cat` / `less` / `more`, `python3 -c` that names a large file) with MiniMax bullets. `grep` / `rg` / `tgrep` are searches and pass through. Pipes pass when the last command is a filter (`grep`, `tgrep`, `head`, `wc`, …). Targeted `read_file` (`limit` ≤ `SHUNT_MAX_LIMIT`) is not replaced. |
 | `scripts/bulk-read` | Packs files into an XML prompt, POSTs to MiniMax, prints bullets on stdout. Usage goes to `~/.grok/shunt-last-usage` (stderr only on a tty or `SHUNT_VERBOSE=1`; Grok merges stderr into the tool result). |
 | `scripts/code-write` | Requires `--reference`. MiniMax returns code; **this script** writes `--target` after stripping fences. Stdout is `wrote <path>` only. |
-| Skills | After a `shunt:` deny, run the `bulk-read` command in the deny text. Do not Read the skill. |
+| Skills | Optional. The hook already swapped the dump for bullets; do not Read the file back. |
 
 Follow-up: run `bulk-read` again with the same `--paths` and a new `--question`. Each call is one shot.
 

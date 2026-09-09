@@ -22,6 +22,8 @@ def run_hook(
         "SHUNT_MIN_LINES",
         "SHUNT_MIN_BYTES",
         "SHUNT_MAX_LIMIT",
+        "SHUNT_FAKE_BULLETS",
+        "GROK_HOOK_EVENT",
     ):
         full_env.pop(k, None)
     if env:
@@ -57,6 +59,42 @@ def big_file(dirpath: str, lines: int, name: str = "big.txt") -> str:
     return path
 
 
+FAKE_BULLETS = "- f0\n- f1\n"
+POST_ENV = {
+    "GROK_HOOK_EVENT": "post_tool_use",
+    "SHUNT_FAKE_BULLETS": FAKE_BULLETS,
+}
+
+
+def run_post(payload: dict, extra_env: dict | None = None, timeout: float = 3.0):
+    env = dict(POST_ENV)
+    if extra_env:
+        env.update(extra_env)
+    body = dict(payload)
+    body.setdefault("hookEventName", "post_tool_use")
+    body.setdefault(
+        "toolResult",
+        {
+            "type": "Bash",
+            "output_for_prompt": "FILEBODY\n" * 50,
+            "output": [],
+            "exit_code": 0,
+        },
+    )
+    return run_hook(body, env=env, timeout=timeout)
+
+
+def shunted_text(out: dict) -> str:
+    spec = out.get("hookSpecificOutput") or {}
+    updated = spec.get("updatedToolOutput")
+    if isinstance(updated, dict):
+        if "output_for_prompt" in updated:
+            return str(updated.get("output_for_prompt") or "")
+        fc = updated.get("FileContent") or {}
+        return str(fc.get("content") or "")
+    return str(updated or "")
+
+
 class CheckReadTests(unittest.TestCase):
     def test_targeted_read_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,7 +108,7 @@ class CheckReadTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(out["decision"], "allow")
 
-    def test_fat_limit_denied(self) -> None:
+    def test_fat_limit_pre_allows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
             _, out = run_hook(
@@ -79,34 +117,35 @@ class CheckReadTests(unittest.TestCase):
                     "toolInput": {"target_file": path, "offset": 1, "limit": 99999},
                 }
             )
-            self.assertEqual(out["decision"], "deny")
+            self.assertEqual(out["decision"], "allow")
 
-    def test_offset_only_denied(self) -> None:
+    def test_untargeted_large_read_pre_allows_post_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, out = run_hook(
-                {
-                    "toolName": "read_file",
-                    "toolInput": {"target_file": path, "offset": 10},
-                }
-            )
-            self.assertEqual(out["decision"], "deny")
-
-    def test_untargeted_large_read_denied(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = big_file(tmp, 800)
-            code, out = run_hook(
+            _, pre = run_hook(
                 {"toolName": "read_file", "toolInput": {"target_file": path}},
                 env={"SHUNT_MIN_LINES": "350"},
             )
-            self.assertEqual(code, 0)
-            self.assertEqual(out["decision"], "deny")
-            self.assertIn("bulk-read", out["reason"])
-            self.assertIn("--paths", out["reason"])
-            self.assertIn("800", out["reason"])
-            self.assertNotIn("Skill:", out["reason"])
-            self.assertIn("Do not Read any skill", out["reason"])
-            self.assertIn("--question", out["reason"])
+            self.assertEqual(pre["decision"], "allow")
+            _, post = run_post(
+                {
+                    "toolName": "read_file",
+                    "toolInput": {"target_file": path},
+                    "toolResult": {
+                        "type": "ReadFile",
+                        "FileContent": {
+                            "content": "def f0():\n",
+                            "raw_output": "def f0():\n",
+                            "total_lines": 800,
+                        },
+                    },
+                },
+                extra_env={"SHUNT_MIN_LINES": "350"},
+            )
+            text = shunted_text(post)
+            self.assertIn("omitted", text)
+            self.assertIn("- f0", text)
+            self.assertNotIn("def f0():", text)
 
     def test_small_file_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -117,21 +156,25 @@ class CheckReadTests(unittest.TestCase):
             self.assertEqual(out["decision"], "allow")
             self.assertEqual(code, 0)
 
-    def test_cat_large_denied_pipe_allowed(self) -> None:
+    def test_cat_large_pre_allows_post_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, dump = run_hook(bash(f"cat {path}"))
-            self.assertEqual(dump["decision"], "deny")
-            _, piped = run_hook(bash(f"cat {path} | grep foo"))
-            self.assertEqual(piped["decision"], "allow")
+            _, pre = run_hook(bash(f"cat {path}"))
+            self.assertEqual(pre["decision"], "allow")
+            _, post = run_post(bash(f"cat {path}"))
+            text = shunted_text(post)
+            self.assertIn("omitted", text)
+            self.assertIn("- f0", text)
+            _, piped = run_post(bash(f"cat {path} | grep foo"))
+            self.assertFalse(piped.get("hookSpecificOutput"))
 
-    def test_cat_pipe_cat_denied(self) -> None:
+    def test_cat_pipe_cat_post_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, out = run_hook(bash(f"cat {path} | cat"))
-            self.assertEqual(out["decision"], "deny")
-            _, tee = run_hook(bash(f"cat {path} | tee"))
-            self.assertEqual(tee["decision"], "deny")
+            _, out = run_post(bash(f"cat {path} | cat"))
+            self.assertIn("omitted", shunted_text(out))
+            _, tee = run_post(bash(f"cat {path} | tee"))
+            self.assertIn("omitted", shunted_text(tee))
 
     def test_cat_pipe_head_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,62 +183,58 @@ class CheckReadTests(unittest.TestCase):
             self.assertEqual(out["decision"], "allow")
             _, counted = run_hook(bash(f"cat {path} | wc -l"))
             self.assertEqual(counted["decision"], "allow")
+            _, tgrep = run_post(bash(f"cat {path} | tgrep -- foo"))
+            self.assertFalse(tgrep.get("hookSpecificOutput"))
 
-    def test_filter_then_cat_still_denies_other_dump(self) -> None:
+    def test_filter_then_cat_still_shunts_other_dump(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
             other = big_file(tmp, 800, "other.txt")
-            _, out = run_hook(bash(f"cat {path} | grep foo && cat {other}"))
-            self.assertEqual(out["decision"], "deny")
+            _, out = run_post(bash(f"cat {path} | grep foo && cat {other}"))
+            self.assertIn("omitted", shunted_text(out))
 
-    def test_head_denied(self) -> None:
+    def test_head_and_tail_are_not_dumps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, out = run_hook(bash(f"head {path}"))
-            self.assertEqual(out["decision"], "deny")
+            _, head = run_post(bash(f"head {path}"))
+            self.assertFalse(head.get("hookSpecificOutput"))
+            _, tail = run_post(bash(f"tail {path}"))
+            self.assertFalse(tail.get("hookSpecificOutput"))
 
-    def test_head_n_9999_denied(self) -> None:
+    def test_cat_and_true_post_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, out = run_hook(bash(f"head -n 9999 {path}"))
-            self.assertEqual(out["decision"], "deny")
+            _, out = run_post(bash(f"cat {path} && true"))
+            self.assertIn("omitted", shunted_text(out))
 
-    def test_tail_denied(self) -> None:
+    def test_cat_semi_post_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, out = run_hook(bash(f"tail {path}"))
-            self.assertEqual(out["decision"], "deny")
+            _, out = run_post(bash(f"cat {path}; true"))
+            self.assertIn("omitted", shunted_text(out))
 
-    def test_cat_and_true_denied(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = big_file(tmp, 800)
-            _, out = run_hook(bash(f"cat {path} && true"))
-            self.assertEqual(out["decision"], "deny")
-
-    def test_cat_semi_denied(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = big_file(tmp, 800)
-            _, out = run_hook(bash(f"cat {path}; true"))
-            self.assertEqual(out["decision"], "deny")
-
-    def test_cat_multi_denied(self) -> None:
+    def test_cat_multi_post_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             big = big_file(tmp, 800, "a.txt")
             small = big_file(tmp, 10, "b.txt")
-            _, out = run_hook(bash(f"cat {big} {small}"))
-            self.assertEqual(out["decision"], "deny")
+            _, out = run_post(bash(f"cat {big} {small}"))
+            self.assertIn("omitted", shunted_text(out))
 
-    def test_subagent_does_not_skip(self) -> None:
+    def test_subagent_still_shunts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, out = run_hook(
+            _, out = run_post(
                 {
                     "toolName": "read_file",
                     "toolInput": {"target_file": path},
                     "subagentType": "shunt:bulk-reader",
+                    "toolResult": {
+                        "type": "ReadFile",
+                        "FileContent": {"content": "body", "total_lines": 800},
+                    },
                 }
             )
-            self.assertEqual(out["decision"], "deny")
+            self.assertIn("omitted", shunted_text(out))
 
     def test_disable_true_allows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,27 +250,38 @@ class CheckReadTests(unittest.TestCase):
             )
             self.assertEqual(out["decision"], "allow")
 
-    def test_disable_zero_still_denies(self) -> None:
+    def test_disable_zero_still_shunts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, out = run_hook(
-                {"toolName": "read_file", "toolInput": {"target_file": path}},
-                env={"SHUNT_DISABLE": "0"},
+            _, out = run_post(
+                {
+                    "toolName": "read_file",
+                    "toolInput": {"target_file": path},
+                    "toolResult": {
+                        "type": "ReadFile",
+                        "FileContent": {"content": "body", "total_lines": 800},
+                    },
+                },
+                extra_env={"SHUNT_DISABLE": "0"},
             )
-            self.assertEqual(out["decision"], "deny")
-            _, out = run_hook(
-                {"toolName": "read_file", "toolInput": {"target_file": path}},
-                env={"SHUNT_DISABLE": "false"},
-            )
-            self.assertEqual(out["decision"], "deny")
+            self.assertIn("omitted", shunted_text(out))
 
-    def test_oneline_blob_denied(self) -> None:
+    def test_oneline_blob_post_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "blob.txt")
             with open(path, "wb") as fh:
                 fh.write(b"x" * 200_000)
-            _, out = run_hook({"toolName": "read_file", "toolInput": {"target_file": path}})
-            self.assertEqual(out["decision"], "deny")
+            _, out = run_post(
+                {
+                    "toolName": "read_file",
+                    "toolInput": {"target_file": path},
+                    "toolResult": {
+                        "type": "ReadFile",
+                        "FileContent": {"content": "x" * 200, "total_lines": 1},
+                    },
+                }
+            )
+            self.assertIn("omitted", shunted_text(out))
 
     def test_fifo_does_not_hang(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,49 +296,41 @@ class CheckReadTests(unittest.TestCase):
             self.assertEqual(out["decision"], "allow")
             self.assertLess(elapsed, 1.5)
 
-    def test_grep_tool_large_file_denied(self) -> None:
+    def test_grep_and_tgrep_are_searches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, out = run_hook(
+            _, grep_tool = run_post(
                 {"toolName": "grep", "toolInput": {"pattern": "^def ", "path": path}}
             )
-            self.assertEqual(out["decision"], "deny")
+            self.assertFalse(grep_tool.get("hookSpecificOutput"))
+            _, bash_grep = run_post(bash(f"grep foo {path}"))
+            self.assertFalse(bash_grep.get("hookSpecificOutput"))
+            _, tgrep = run_post(bash(f'tgrep -F -- "foo" {path}'))
+            self.assertFalse(tgrep.get("hookSpecificOutput"))
+            _, tgrep_dir = run_post(bash(f'tgrep -- "foo" {tmp}'))
+            self.assertFalse(tgrep_dir.get("hookSpecificOutput"))
 
-    def test_grep_tool_dir_allowed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            big_file(tmp, 800)
-            _, out = run_hook(
-                {"toolName": "grep", "toolInput": {"pattern": "foo", "path": tmp}}
-            )
-            self.assertEqual(out["decision"], "allow")
-
-    def test_bash_grep_file_denied(self) -> None:
+    def test_python_c_post_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800)
-            _, out = run_hook(bash(f"grep foo {path}"))
-            self.assertEqual(out["decision"], "deny")
-
-    def test_python_c_denied(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = big_file(tmp, 800)
-            _, out = run_hook(
+            _, out = run_post(
                 bash(f'python3 -c "print(open({path!r}).read())"')
             )
-            self.assertEqual(out["decision"], "deny")
+            self.assertIn("omitted", shunted_text(out))
 
-    def test_python_c_relative_denied(self) -> None:
+    def test_python_c_relative_post_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             big_file(tmp, 800, "big.py")
-            _, out = run_hook(
+            _, out = run_post(
                 bash("python3 -c \"print(open('big.py').read())\"", cwd=tmp)
             )
-            self.assertEqual(out["decision"], "deny")
+            self.assertIn("omitted", shunted_text(out))
 
-    def test_bulk_read_in_filename_still_denies(self) -> None:
+    def test_bulk_read_in_filename_still_shunts_cat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = big_file(tmp, 800, "notes-bulk-read.md")
-            _, out = run_hook(bash(f"cat {path}"))
-            self.assertEqual(out["decision"], "deny")
+            _, out = run_post(bash(f"cat {path}"))
+            self.assertIn("omitted", shunted_text(out))
 
     def test_python_bulk_read_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -331,6 +373,9 @@ class InstallUserHookTests(unittest.TestCase):
             self.assertIn("grep", matcher)
             cmd = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
             self.assertTrue(cmd.endswith("check-read.py"))
+            post = data["hooks"]["PostToolUse"][0]
+            self.assertIn("read_file", post["matcher"])
+            self.assertEqual(post["hooks"][0]["timeout"], 120)
 
 
 if __name__ == "__main__":

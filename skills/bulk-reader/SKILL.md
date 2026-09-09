@@ -1,24 +1,20 @@
 ---
 name: bulk-reader
 description: >
-  After a shunt: deny, run the bulk-read bash command from the deny text.
-  Do not Read this skill. Do not Read or cat the file. Also when the user
-  says bulk-read / shunt, or a question spans large files.
+  After a shunt omitted-dump, use those bullets. Do not Read this skill or
+  the file. Also when the user says bulk-read / shunt, or a question spans
+  large files.
 ---
 
-File bodies go to MiniMax via a script. This session keeps the script's stdout.
-Do not Read this skill file; the deny reason already has the command.
+File bodies go to MiniMax via a PostToolUse hook. The Read/cat result the
+model sees is already bullets (`shunt: omitted …`). Do not Read the file back.
 
-0. If large Reads are not being denied, run `python3 ~/.grok/plugins/shunt/scripts/install-user-hook` once, then retry.
-1. After a `shunt:` deny, run the `python3 …/bulk-read` command from that deny as the next tool call. You may replace `--question`.
-2. Or, without a deny:
+0. If dumps still land in the parent, run `python3 ~/.grok/plugins/shunt/scripts/install-user-hook` once (needs PostToolUse), then a new session.
+1. If a result starts with `shunt: omitted`, answer from those bullets.
+2. Follow-up on the same files without a dump:
 
 ```
 python3 ~/.grok/plugins/shunt/scripts/bulk-read --question "<question>" --paths <path> [path...]
 ```
 
-If that path is missing, use the `scripts/bulk-read` next to the plugin's `hooks/check-read.py`.
-3. Return the stdout bullets. Do not Read or cat the files.
-4. Follow-up on the same files: run the same command again with a new `--question` and the same `--paths`.
-
-Targeted edit after understanding: `read_file` with `offset` and `limit` on the section you will change (`limit` ≤ 120).
+Targeted edit: `read_file` with `offset` and `limit` (`limit` ≤ 120).

@@ -36,7 +36,19 @@ def hook_body(check_read: Path) -> dict:
                         }
                     ],
                 }
-            ]
+            ],
+            "PostToolUse": [
+                {
+                    "matcher": "read_file|Read|run_terminal_command|Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": str(check_read),
+                            "timeout": 120,
+                        }
+                    ],
+                }
+            ],
         }
     }
 

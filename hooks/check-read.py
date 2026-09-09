@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""PreToolUse gate: block untargeted large-file reads on the frontier session.
+"""Gate large-file dumps without a deny turn.
 
-Fail-open on parse errors, missing files, non-regular files, and timeouts
-(the harness also fail-opens). Explicit deny JSON is the only block.
+PreToolUse allows. PostToolUse replaces the model's copy of the tool
+result with MiniMax bullets (or a stub). Fail-open: a hook error leaves
+the original result. tgrep/grep/rg are searches, not dumps.
 """
 from __future__ import annotations
 
@@ -16,12 +17,13 @@ from pathlib import Path
 DEFAULT_MIN_LINES = 350
 DEFAULT_MIN_BYTES = 65536
 DEFAULT_MAX_LIMIT = 120
-READERS = {"cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg"}
+DUMPERS = {"cat", "less", "more"}
 REDUCERS = {
     "grep",
     "egrep",
     "fgrep",
     "rg",
+    "tgrep",
     "awk",
     "gawk",
     "sed",
@@ -34,6 +36,10 @@ REDUCERS = {
     "head",
     "tail",
 }
+WORKER_SYSTEM = (
+    "You are a precise code analyst. Structured bullets only. "
+    "No greetings, no full file body. Quote at most 8 lines per point."
+)
 PREFIXES = {"command", "env", "nice", "time", "exec", "nohup"}
 SUBST_MARKERS = ("`", "$(", "<(")
 SHUNT_MARKERS = {
@@ -50,11 +56,6 @@ QUOTED = re.compile(r"""(['"])([^'"]+)\1""")
 
 def allow() -> None:
     sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
-    raise SystemExit(0)
-
-
-def deny(reason: str) -> None:
-    sys.stdout.write(json.dumps({"decision": "deny", "reason": reason}) + "\n")
     raise SystemExit(0)
 
 
@@ -297,25 +298,13 @@ def bash_read_paths(command: str) -> list[str]:
                 continue
             prog = os.path.basename(strip_quotes(parts[0]))
             paths.extend(interpreter_dump_paths(parts, piece))
-            if prog in READERS:
+            if prog in DUMPERS:
                 paths.extend(extract_file_args(parts[1:]))
     return paths
 
 
 def bulk_read_script() -> str:
     return str(Path(__file__).parent.parent / "scripts" / "bulk-read")
-
-
-def deny_reason(path: str, lines: int, size: int, lines_n: int, bytes_n: int) -> str:
-    script = bulk_read_script()
-    return (
-        f"shunt: {path} is {lines} lines / {size} bytes "
-        f"(thresholds {lines_n} lines, {bytes_n} bytes). "
-        "Do not Read, cat, or open it. Do not Read any skill. "
-        "Next tool: run_terminal_command with this exact command "
-        "(you may replace the --question string), then answer from stdout:\n"
-        f'python3 {script} --question "What does the user need from this file?" --paths {path}'
-    )
 
 
 def targeted_window(inp: dict) -> bool:
@@ -340,28 +329,18 @@ def over_threshold(path: str, cwd: str) -> tuple[str, int, int] | None:
     return None
 
 
-def decide(payload: dict) -> None:
-    if disabled():
-        allow()
-
+def dump_hits(payload: dict) -> list[tuple[str, int, int]]:
+    """Paths this call would dump in full. Empty = search/window/small."""
     tool = payload.get("toolName") or ""
     inp = payload.get("toolInput") or {}
     cwd = payload.get("cwd") or payload.get("workspaceRoot") or os.getcwd()
     hits: list[tuple[str, int, int]] = []
-
     if tool in {"read_file", "Read"}:
         if targeted_window(inp):
-            allow()
+            return []
         path = inp.get("target_file") or inp.get("path")
         if not path:
-            allow()
-        hit = over_threshold(str(path), str(cwd))
-        if hit:
-            hits.append(hit)
-    elif tool in {"grep", "Grep"}:
-        path = inp.get("path")
-        if not path:
-            allow()
+            return []
         hit = over_threshold(str(path), str(cwd))
         if hit:
             hits.append(hit)
@@ -370,13 +349,135 @@ def decide(payload: dict) -> None:
             hit = over_threshold(path, str(cwd))
             if hit:
                 hits.append(hit)
-    else:
-        allow()
+    return hits
 
+
+def is_post(payload: dict) -> bool:
+    raw = (
+        os.environ.get("GROK_HOOK_EVENT")
+        or payload.get("hookEventName")
+        or payload.get("hook_event_name")
+        or ""
+    )
+    return "post" in str(raw).lower()
+
+
+def noop() -> None:
+    raise SystemExit(0)
+
+
+def question_from(payload: dict) -> str:
+    for key in ("userPrompt", "prompt", "lastUserMessage"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()[:2000]
+    return "What does the user need from this file?"
+
+
+def worker_bullets(path: str, question: str) -> str | None:
+    fake = os.environ.get("SHUNT_FAKE_BULLETS")
+    if fake is not None:
+        return fake
+    try:
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        sys.path.insert(0, str(scripts))
+        from shunt_worker import chat, pack_files, report_usage  # noqa: WPS433
+
+        packed = pack_files([path])
+        text, usage = chat(
+            [
+                {"role": "system", "content": WORKER_SYSTEM},
+                {
+                    "role": "user",
+                    "content": f"Question:\n{question}\n\nFiles:\n{packed}",
+                },
+            ]
+        )
+        report_usage(usage)
+        text = (text or "").strip()
+        return text or None
+    except (Exception, SystemExit):
+        return None
+
+
+def omitted_text(path: str, lines: int, size: int, bullets: str | None) -> str:
+    header = (
+        f"shunt: omitted {lines} lines / {size} bytes from the frontier "
+        f"({path}).\n"
+    )
+    if bullets:
+        return header + "\n" + bullets.strip() + "\n"
+    script = bulk_read_script()
+    return (
+        header
+        + "Worker unavailable. Run:\n"
+        f'python3 {script} --question "What does the user need from this file?" '
+        f"--paths {path}\n"
+    )
+
+
+def rewrite_tool_result(original: object, text: str) -> object:
+    if original is None or isinstance(original, str):
+        return text
+    if not isinstance(original, dict):
+        return text
+    out = dict(original)
+    kind = out.get("type")
+    if kind == "ReadFile":
+        fc = dict(out.get("FileContent") or {})
+        fc["content"] = text
+        fc["content_concise"] = text
+        fc["raw_output"] = text
+        fc["total_lines"] = text.count("\n") or 1
+        out["FileContent"] = fc
+        out.pop("FileNotFound", None)
+        return out
+    if kind == "Bash" or "output_for_prompt" in out:
+        encoded = list(text.encode("utf-8"))
+        out["output_for_prompt"] = text
+        out["output"] = encoded
+        out["truncated"] = False
+        if "total_bytes" in out:
+            out["total_bytes"] = len(encoded)
+        out["exit_code"] = 0
+        return out
+    return text
+
+
+def post_decide(payload: dict) -> None:
+    tr = payload.get("toolResult") or payload.get("tool_response")
+    if isinstance(tr, dict) and tr.get("FileNotFound"):
+        noop()
+    hits = dump_hits(payload)
     if not hits:
-        allow()
+        noop()
     full, lines, size = hits[0]
-    deny(deny_reason(full, lines, size, min_lines(), min_bytes()))
+    bullets = worker_bullets(full, question_from(payload))
+    text = omitted_text(full, lines, size, bullets)
+    updated = rewrite_tool_result(tr, text)
+    sys.stdout.write(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "updatedToolOutput": updated,
+                }
+            }
+        )
+        + "\n"
+    )
+    raise SystemExit(0)
+
+
+def decide(payload: dict) -> None:
+    if disabled():
+        if is_post(payload):
+            noop()
+        allow()
+    if is_post(payload):
+        post_decide(payload)
+        return
+    allow()
 
 
 def main() -> None:
