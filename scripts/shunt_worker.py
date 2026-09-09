@@ -165,9 +165,22 @@ def chat(messages: list[dict], *, temperature: float = 0.2) -> tuple[str, dict]:
 
 
 def report_usage(usage: dict) -> None:
+    """Record MiniMax usage without leaking it into grok bash tool results.
+
+    Grok merges stderr into the tool payload, so a default stderr line
+    costs a frontier turn of noise. Write a side file; print stderr only
+    on a tty or SHUNT_VERBOSE=1.
+    """
     _, model, _, _ = settings()
     prompt = usage.get("prompt_tokens", "?")
     completion = usage.get("completion_tokens", "?")
-    sys.stderr.write(
-        f"shunt: {model} prompt={prompt} completion={completion}\n"
-    )
+    line = f"shunt: {model} prompt={prompt} completion={completion}\n"
+    log = Path.home() / ".grok" / "shunt-last-usage"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(line, encoding="utf-8")
+    except OSError:
+        pass
+    verbose = os.environ.get("SHUNT_VERBOSE", "").strip().lower() in {"1", "true"}
+    if verbose or sys.stderr.isatty():
+        sys.stderr.write(line)

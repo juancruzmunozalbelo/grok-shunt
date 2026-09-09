@@ -41,9 +41,9 @@ Any OpenAI-compatible endpoint works via `SHUNT_BASE_URL` / `SHUNT_MODEL`.
 | Layer | Role |
 | --- | --- |
 | Hook `hooks/check-read.py` | Denies untargeted `read_file` of a large file (over `SHUNT_MIN_LINES` or `SHUNT_MIN_BYTES`). Denies `cat` / `head` / `tail` / `less` / `more` / `grep` / `rg`, including `cat f && true` and multi-file `cat`. Denies the `grep` tool on a large **file** (directories pass). Denies `python3 -c` that names a large file, including a relative path in quotes. A pipe passes only when its last command is a filter (`grep`, `head`, `wc`, …); `cat FILE` piped to `cat` is denied. `bulk-read` / `code-write` pass. Targeted `read_file` passes only when `limit` is set and `limit ≤ SHUNT_MAX_LIMIT`. |
-| `scripts/bulk-read` | Packs files into an XML prompt, POSTs to MiniMax, prints bullets on stdout. Usage on stderr. |
+| `scripts/bulk-read` | Packs files into an XML prompt, POSTs to MiniMax, prints bullets on stdout. Usage goes to `~/.grok/shunt-last-usage` (stderr only on a tty or `SHUNT_VERBOSE=1`; Grok merges stderr into the tool result). |
 | `scripts/code-write` | Requires `--reference`. MiniMax returns code; **this script** writes `--target` after stripping fences. Stdout is `wrote <path>` only. |
-| Skills | Tell the frontier to run those scripts after a deny. |
+| Skills | After a `shunt:` deny, run the `bulk-read` command in the deny text. Do not Read the skill. |
 
 Follow-up: run `bulk-read` again with the same `--paths` and a new `--question`. Each call is one shot.
 
@@ -79,6 +79,7 @@ There are no plugin subagents. MiniMax is only reached over HTTP.
 | `SHUNT_BASE_URL` | `https://api.minimax.io/v1` | Chat completions base. |
 | `SHUNT_TIMEOUT_SECONDS` | `120` | Worker HTTP timeout. |
 | `SHUNT_MAX_BYTES` | `8000000` | Max packed file bytes per `bulk-read` call; split larger jobs. |
+| `SHUNT_VERBOSE` | unset | `1` / `true` print MiniMax usage on stderr (also prints when stderr is a tty). |
 
 ## Disable / uninstall
 

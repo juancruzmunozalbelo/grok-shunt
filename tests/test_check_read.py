@@ -104,6 +104,9 @@ class CheckReadTests(unittest.TestCase):
             self.assertIn("bulk-read", out["reason"])
             self.assertIn("--paths", out["reason"])
             self.assertIn("800", out["reason"])
+            self.assertNotIn("Skill:", out["reason"])
+            self.assertIn("Do not Read any skill", out["reason"])
+            self.assertIn("--question", out["reason"])
 
     def test_small_file_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

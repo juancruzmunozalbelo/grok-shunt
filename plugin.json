@@ -1,5 +1,5 @@
 {
   "name": "shunt",
   "description": "Keep large file bodies off Grok's frontier: a hook blocks untargeted reads, a MiniMax script returns bullets.",
-  "version": "0.4.1"
+  "version": "0.4.2"
 }

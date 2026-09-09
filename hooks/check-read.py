@@ -311,10 +311,10 @@ def deny_reason(path: str, lines: int, size: int, lines_n: int, bytes_n: int) ->
     return (
         f"shunt: {path} is {lines} lines / {size} bytes "
         f"(thresholds {lines_n} lines, {bytes_n} bytes). "
-        "Do not Read or cat it. Run this command and keep only its stdout:\n"
-        f'python3 {script} --question "<the user question>" --paths {path}\n'
-        "Use offset/limit only for a targeted edit window "
-        f"(limit ≤ {max_limit()}). Skill: bulk-reader."
+        "Do not Read, cat, or open it. Do not Read any skill. "
+        "Next tool: run_terminal_command with this exact command "
+        "(you may replace the --question string), then answer from stdout:\n"
+        f'python3 {script} --question "What does the user need from this file?" --paths {path}'
     )
 
 

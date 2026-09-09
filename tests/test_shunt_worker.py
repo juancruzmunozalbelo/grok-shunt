@@ -53,6 +53,22 @@ class KeyAndCliTests(unittest.TestCase):
         with patch.dict(os.environ, {"MINIMAX_API_KEY": "tok_test"}, clear=False):
             self.assertEqual(shunt_worker.load_api_key(), "tok_test")
 
+    def test_report_usage_silent_when_not_tty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            buf = []
+            with patch.object(shunt_worker.Path, "home", return_value=home):
+                with patch.object(sys.stderr, "isatty", return_value=False):
+                    with patch.dict(os.environ, {"SHUNT_VERBOSE": ""}, clear=False):
+                        with patch.object(sys.stderr, "write", side_effect=buf.append):
+                            shunt_worker.report_usage(
+                                {"prompt_tokens": 9, "completion_tokens": 3}
+                            )
+            self.assertEqual(buf, [])
+            text = (home / ".grok" / "shunt-last-usage").read_text(encoding="utf-8")
+            self.assertIn("prompt=9", text)
+            self.assertIn("completion=3", text)
+
     def test_bulk_read_stdout_is_worker_text_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "big.py"
